@@ -15,6 +15,10 @@ import com.alswns1201.wallet.support.WalletException;
 
 import lombok.RequiredArgsConstructor;
 
+/**
+ * 지갑 트랜잭션 처리. 충전·결제·취소는 락 없이 부르면 동시 요청에서 lost update가 난다 —
+ * 반드시 WalletFacade(락)를 거쳐 호출한다. 생성·조회는 락이 필요 없어 컨트롤러가 직접 부른다.
+ */
 @Service
 @RequiredArgsConstructor
 public class WalletService {
@@ -68,6 +72,13 @@ public class WalletService {
 		} catch (DataIntegrityViolationException e) {
 			throw new WalletException(ErrorCode.ALREADY_CANCELED);
 		}
+	}
+
+	@Transactional(readOnly = true)
+	public Long findWalletIdOf(Long transactionId) {
+		return transactionRepository.findById(transactionId)
+				.map(WalletTransaction::getWalletId)
+				.orElseThrow(() -> new WalletException(ErrorCode.TRANSACTION_NOT_FOUND));
 	}
 
 	@Transactional(readOnly = true)

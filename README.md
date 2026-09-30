@@ -108,7 +108,7 @@ API는 그대로 동기다. 바뀌는 건 테스트가 **같은 지갑에 요청
   A: 1,000 저장         B: 1,000 저장   ← A의 충전이 사라짐
   ```
 - 원장의 `balanceAfter`가 100개 중 10~40개 값으로만 찍힌다 → 여러 요청이 같은 잔액을 동시에 읽었다는 흔적.
-- 테스트는 "깨진다"를 검증한다: `잔액 < 성공 건수 × 1,000원`. 8단계에서 락을 넣고 정확히 100,000원을 검증하도록 바꾼다.
+- 테스트는 "깨진다"를 검증한다: `잔액 < 성공 건수 × 1,000원`. 8단계에서 락을 거치는 버전을 옆에 추가해 나란히 비교한다 (이 테스트는 대조군으로 남긴다).
 - 참고: 처음 실행했을 때 한 번 `DataIntegrityViolationException` 2건이 섞여 나왔고, 이후 30번 넘게 다시 돌려도 재현되지 않았다.
   H2가 동시 갱신 충돌을 이렇게 보고한 것으로 추정한다. 검증은 성공 건수를 기준으로 하므로 결과에는 영향이 없다.
 
@@ -138,6 +138,111 @@ ext['testcontainers.version'] = '1.21.3'                 // Testcontainers 올�
 tasks.named('test') { systemProperty 'api.version', '1.44' }  // docker-java API 버전 고정
 ```
 
+### 8. 지갑 락 — lost update 해결
+
+6단계에서 본 문제는 **같은 지갑의 잔액을 여러 요청이 동시에 읽고 고치는 것**이었다.
+해결은 간단히 말하면 "같은 지갑에 대한 요청은 한 줄로 세워 하나씩 처리한다"이고, 그 줄을 세우는 도구가 락이다.
+
+#### 락이란 — Redis 키 하나로 "지금 누가 쓰는 중" 표시
+
+```
+요청 A: Redis에 "wallet:lock:1" 키 만들기 시도 → 성공 (A가 락 주인)
+요청 B: "wallet:lock:1" 만들기 시도 → 이미 있음 → 기다림
+요청 A: 충전 처리 → 커밋 → 키 삭제 (락 해제)
+요청 B: 이제 성공 → A가 커밋한 잔액을 읽고 처리
+```
+
+지갑이 다르면 키도 다르다(`wallet:lock:1`, `wallet:lock:2`). 다른 지갑끼리는 서로 기다리지 않는다.
+
+#### 왜 Redis인가
+
+| 방법 | 문제 |
+|---|---|
+| 자바 `synchronized` / `ReentrantLock` | 서버(JVM) 한 대 안에서만 통한다. 서버가 2대면 각자 따로 잠가서 소용없다. |
+| DB 비관적 락 (`SELECT ... FOR UPDATE`) | 실무에서도 많이 쓰는 방법. 다만 기다리는 동안 DB 커넥션을 붙잡고 있어서, 요청이 몰리면 커넥션 풀과 DB가 먼저 버거워진다. |
+| **Redis 분산 락** | 서버가 몇 대든 같은 Redis를 보므로 한 곳에서 줄을 세운다. 기다리는 동안 DB 커넥션을 쓰지 않는다. |
+
+서버 여러 대에 걸쳐 통하는 락이라 **분산 락**이라고 부른다.
+
+#### 왜 Redisson인가
+
+`SET key value NX PX 3000`으로 직접 만들 수도 있지만, 직접 챙겨야 할 게 많다. Redisson(`RLock`)이 대신 해 준다.
+
+- **남의 락을 풀면 안 된다** → 락 값에 주인(스레드) ID를 넣고 주인만 풀 수 있다 (`isHeldByCurrentThread`).
+- **서버가 죽으면 락이 영원히 남는다** → 만료 시간이 있다. 대신 처리가 길어지면 **watchdog**이 살아 있는 동안 자동 연장한다
+  (`leaseTime`을 안 주면 watchdog 사용, 기본 30초 단위).
+- **기다리는 방식** → "풀렸나?"를 계속 묻지 않고, 락이 풀리면 Redis pub/sub 알림을 받아 깨어난다.
+
+`WalletLockManager`는 이걸 감싼 얇은 클래스다.
+
+```java
+lockManager.executeWithLock(walletId, () -> walletService.charge(walletId, amount));
+// tryLock(최대 5초 대기) → 못 잡으면 503 LOCK_TIMEOUT → 잡으면 실행 → finally에서 내가 잡은 락만 unlock
+```
+
+#### 핵심: 락은 트랜잭션 **바깥**에서 잡는다
+
+락을 넣는 것보다 **어디서 잡느냐**가 더 중요하다.
+
+```
+❌ 트랜잭션 안에서 락:   트랜잭션 시작 → 락 획득 → 충전 → 락 해제 → 커밋
+                                                          ↑ 이 틈에 B가 락을 잡고
+                                                            아직 커밋 안 된 = 옛 잔액을 읽는다
+✅ 락이 트랜잭션을 감싼다: 락 획득 → 트랜잭션 시작 → 충전 → 커밋 → 락 해제
+```
+
+JPA는 변경을 **커밋 직전에** flush 하기 때문에, ❌에서는 잔액 UPDATE 자체가 락을 푼 뒤에 DB로 나간다.
+
+그런데 락과 트랜잭션을 `WalletService` 한 클래스 안에서 처리하려고 하면 두 방법 모두 안 된다.
+
+1. **`@Transactional` 메서드 안에서 락을 잡는다** → 위의 ❌ 순서가 된다. 커밋은 메서드가 끝난 뒤 프록시가 하기 때문.
+2. **락 메서드가 같은 클래스의 `@Transactional` 메서드를 `this.charge()`로 부른다** → 순서는 맞아 보이지만
+   **트랜잭션이 아예 안 열린다.** `@Transactional`은 프록시가 바깥에서 들어오는 호출을 가로채서 동작하는데,
+   자기 자신 호출은 프록시를 거치지 않는다. (private 메서드에 `@Transactional`이 안 먹는 것과 같은 원리)
+
+그래서 **락을 잡는 빈과 트랜잭션을 여는 빈을 나눈다.**
+
+```
+Controller ─ 충전·결제·취소 ─▶ WalletFacade (락)
+                                  락 획득
+                                    └─▶ WalletService (@Transactional, 다른 빈이라 프록시 경유)
+                                          트랜잭션 시작 → 처리 → 커밋
+                                  락 해제
+Controller ─ 생성·조회 ──────▶ WalletService (락 불필요)
+```
+
+| 클래스 | 역할 |
+|---|---|
+| `WalletLockManager` (새로 만듦) | Redisson으로 지갑별 락 잡기/풀기 |
+| `WalletFacade` (새로 만듦) | 락 → `WalletService` 호출 → 락 해제. 충전·결제·취소의 입구 |
+| `WalletService` (그대로) | 실제 처리. `@Transactional`. 코드는 그대로이고 "변경은 Facade를 거쳐 부를 것" 주석만 추가 |
+| `WalletController` | 충전·결제·취소는 Facade로, 생성·조회는 `WalletService`로 |
+
+- 취소는 거래 ID로 들어오므로, Facade가 먼저 `findWalletIdOf(transactionId)`로 어느 지갑을 잠글지 찾는다.
+  거래의 지갑은 바뀌지 않으니 락 밖에서 읽어도 된다.
+- 고민: `WalletService`를 "락이 필요한 것(충전·결제·취소)"과 "필요 없는 것(생성·조회)" 두 클래스로 나누면
+  규칙이 클래스 이름으로 드러나서 더 깔끔하다. 다만 이름 변경이 diff를 덮어 핵심이 묻혀서, 이 실습은 **클래스 하나를 유지**했다.
+  대신 `WalletService.charge()`는 public이라 락 없이 직접 부를 수 있다 — 테스트는 이걸 일부러 대조군으로 쓴다.
+  실무에서는 팀 규칙이나 패키지 구조로 "변경은 Facade로만" 들어오게 막는다.
+
+#### 테스트 — 네 가지를 나란히
+
+`WalletConcurrencyTest` (요청 100건 동시, 로컬 실행 예)
+
+| 테스트 | 호출 경로 | 결과 |
+|---|---|---|
+| 락 없음 (6단계 대조군) | `WalletService` 직접 | 100건 성공, 잔액 **13,000원**, `balanceAfter` 서로 다른 값 13개 |
+| **지갑 락** | `WalletFacade` | 100건 성공, 잔액 **정확히 100,000원**, `balanceAfter` **100개 전부 다름** |
+| **지갑 락 + 결제** | `WalletFacade` | 잔액 20,000원에 1,000원 결제 100건 → **정확히 20건 성공**, 80건 `INSUFFICIENT_BALANCE`, 잔액 0원 |
+| 잘못된 락 위치 | `@Transactional` 안에서 락 | 100건 성공, 잔액 **14,000원** — 락을 넣었는데도 깨진다 |
+
+- 결제 테스트: 잔액 검사와 차감이 락 안에서 한 번에 일어나므로 20건을 넘겨 결제되지(초과 결제) 않는다.
+- 락을 거치면 100건이 한 줄로 처리돼서 조금 느려진다 (100건에 300~500ms). 정확성과 맞바꾸는 비용이다.
+- **잘못된 락 위치 테스트에 대해 솔직하게:** 락 해제와 커밋 사이의 틈은 아주 짧다. 처음엔 그대로 돌렸더니 5번 중 2번은 멀쩡했고,
+  깨져도 1,000~2,000원 차이였다. 운영에서는 GC 멈춤, 느린 커밋, 락 뒤의 후처리 코드 때문에 이 틈이 벌어진다.
+  테스트에서는 **락 해제 후 커밋 전에 후처리 10ms**(`Thread.sleep`)를 넣어 그 상황을 만들었고, 그러면 매번 크게 깨진다.
+  즉 "대부분 괜찮아 보이지만 가끔 돈이 사라지는" 버그라서 더 위험하다.
+
 ## API
 
 | 메서드 | 경로 | 설명 | 주요 에러 |
@@ -145,9 +250,9 @@ tasks.named('test') { systemProperty 'api.version', '1.44' }  // docker-java API
 | POST | `/api/wallets` | 지갑 생성 `{"userId": 1}` → 201 | 409 `DUPLICATE_WALLET` |
 | GET | `/api/wallets/{walletId}` | 지갑 조회 (잔액) | 404 `WALLET_NOT_FOUND` |
 | GET | `/api/wallets/{walletId}/transactions` | 거래 내역 (최신순) — 충전·결제·취소마다 한 줄씩 쌓인 원장 | 404 `WALLET_NOT_FOUND` |
-| POST | `/api/wallets/{walletId}/charge` | 충전 `{"amount": 10000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 404 |
-| POST | `/api/wallets/{walletId}/pay` | 결제 `{"amount": 3000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 422 `INSUFFICIENT_BALANCE`, 404 |
-| POST | `/api/transactions/{transactionId}/cancel` | 결제 취소 → 생성된 CANCEL 거래 | 404 `TRANSACTION_NOT_FOUND`, 409 `ALREADY_CANCELED`, 422 `NOT_CANCELABLE` |
+| POST | `/api/wallets/{walletId}/charge` | 충전 `{"amount": 10000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 404, 503 `LOCK_TIMEOUT` |
+| POST | `/api/wallets/{walletId}/pay` | 결제 `{"amount": 3000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 422 `INSUFFICIENT_BALANCE`, 404, 503 `LOCK_TIMEOUT` |
+| POST | `/api/transactions/{transactionId}/cancel` | 결제 취소 → 생성된 CANCEL 거래 | 404 `TRANSACTION_NOT_FOUND`, 409 `ALREADY_CANCELED`, 422 `NOT_CANCELABLE`, 503 `LOCK_TIMEOUT` |
 
 에러 응답 예시:
 

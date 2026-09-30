@@ -12,6 +12,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 import com.alswns1201.wallet.service.TransactionResponse;
+import com.alswns1201.wallet.service.WalletFacade;
 import com.alswns1201.wallet.service.WalletResponse;
 import com.alswns1201.wallet.service.WalletService;
 
@@ -25,6 +26,7 @@ import lombok.RequiredArgsConstructor;
 public class WalletController {
 
 	private final WalletService walletService;
+	private final WalletFacade walletFacade;
 
 	@PostMapping("/wallets")
 	@ResponseStatus(HttpStatus.CREATED)
@@ -44,17 +46,17 @@ public class WalletController {
 
 	@PostMapping("/wallets/{walletId}/charge")
 	public TransactionResponse charge(@PathVariable Long walletId, @Valid @RequestBody AmountRequest request) {
-		return walletService.charge(walletId, request.amount());
+		return walletFacade.charge(walletId, request.amount());
 	}
 
 	@PostMapping("/wallets/{walletId}/pay")
 	public TransactionResponse pay(@PathVariable Long walletId, @Valid @RequestBody AmountRequest request) {
-		return walletService.pay(walletId, request.amount());
+		return walletFacade.pay(walletId, request.amount());
 	}
 
 	@PostMapping("/transactions/{transactionId}/cancel")
 	public TransactionResponse cancel(@PathVariable Long transactionId) {
-		return walletService.cancel(transactionId);
+		return walletFacade.cancel(transactionId);
 	}
 
 	public record CreateWalletRequest(@NotNull Long userId) {
