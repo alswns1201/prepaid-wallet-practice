@@ -2,6 +2,7 @@ package com.alswns1201.wallet.service;
 
 import java.util.List;
 
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -41,6 +42,32 @@ public class WalletService {
 		Wallet wallet = getWallet(walletId);
 		wallet.pay(amount);
 		return TransactionResponse.from(transactionRepository.save(WalletTransaction.pay(wallet, amount)));
+	}
+
+	/**
+	 * 결제 취소. 원 결제 행은 그대로 두고 CANCEL 행을 추가한다.
+	 * exists 확인은 평소 경로용이고, 동시에 두 요청이 확인을 통과해도 originalTransactionId unique 제약이 하나를 막는다.
+	 * 막힌 쪽은 예외로 트랜잭션 전체가 롤백되므로 환불도 반영되지 않는다.
+	 */
+	@Transactional
+	public TransactionResponse cancel(Long transactionId) {
+		WalletTransaction original = transactionRepository.findById(transactionId)
+				.orElseThrow(() -> new WalletException(ErrorCode.TRANSACTION_NOT_FOUND));
+		if (!original.isPay()) {
+			throw new WalletException(ErrorCode.NOT_CANCELABLE);
+		}
+		if (transactionRepository.existsByOriginalTransactionId(transactionId)) {
+			throw new WalletException(ErrorCode.ALREADY_CANCELED);
+		}
+
+		Wallet wallet = getWallet(original.getWalletId());
+		wallet.refund(original.getAmount());
+		try {
+			// 제약 위반을 이 메서드 안에서 잡으려고 바로 flush 한다 (커밋 시점까지 미루면 ALREADY_CANCELED로 못 바꾼다)
+			return TransactionResponse.from(transactionRepository.saveAndFlush(WalletTransaction.cancelOf(original, wallet)));
+		} catch (DataIntegrityViolationException e) {
+			throw new WalletException(ErrorCode.ALREADY_CANCELED);
+		}
 	}
 
 	@Transactional(readOnly = true)

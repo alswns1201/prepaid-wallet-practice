@@ -17,7 +17,7 @@ import lombok.NoArgsConstructor;
 
 /**
  * 지갑 거래 기록 (충전/결제/취소). 잔액이 바뀔 때마다 한 줄씩 쌓인다.
- * 생성 메서드는 충전·결제·취소 커밋에서 하나씩 추가한다.
+ * 추가만 하는(append-only) 원장이라 한 번 쌓인 행은 수정하지 않는다 — 결제 취소도 원 결제 행을 고치지 않고 CANCEL 행을 새로 쌓는다.
  */
 @Entity
 @Getter
@@ -43,11 +43,12 @@ public class WalletTransaction {
 	@Column(nullable = false)
 	private long balanceAfter;
 
-	@Enumerated(EnumType.STRING)
-	@Column(nullable = false)
-	private TransactionStatus status;
-
-	/** CANCEL 거래가 가리키는 원 결제 거래 */
+	/**
+	 * CANCEL 거래가 가리키는 원 결제 거래.
+	 * unique 제약 — 한 결제에 CANCEL 행은 하나만 들어갈 수 있어서, 동시에 취소가 들어와도 DB가 이중 취소를 막는다.
+	 * (CHARGE/PAY 행은 NULL이고, unique 칼럼이라도 NULL은 여러 개 허용된다)
+	 */
+	@Column(unique = true)
 	private Long originalTransactionId;
 
 	@Column(nullable = false)
@@ -59,7 +60,6 @@ public class WalletTransaction {
 		this.type = type;
 		this.amount = amount;
 		this.balanceAfter = balanceAfter;
-		this.status = TransactionStatus.COMPLETED;
 		this.originalTransactionId = originalTransactionId;
 		this.createdAt = LocalDateTime.now();
 	}
@@ -72,5 +72,15 @@ public class WalletTransaction {
 	/** 결제가 반영된 지갑으로 PAY 거래를 만든다. */
 	public static WalletTransaction pay(Wallet wallet, long amount) {
 		return new WalletTransaction(wallet.getId(), TransactionType.PAY, amount, wallet.getBalance(), null);
+	}
+
+	/** 환불이 반영된 지갑으로, 원 결제를 가리키는 CANCEL 거래를 만든다. */
+	public static WalletTransaction cancelOf(WalletTransaction original, Wallet wallet) {
+		return new WalletTransaction(wallet.getId(), TransactionType.CANCEL, original.getAmount(), wallet.getBalance(),
+				original.getId());
+	}
+
+	public boolean isPay() {
+		return type == TransactionType.PAY;
 	}
 }

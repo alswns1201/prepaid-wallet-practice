@@ -164,6 +164,79 @@ class WalletApiTest {
 				.andExpect(jsonPath("$.code", is("INVALID_AMOUNT")));
 	}
 
+	@Test
+	@DisplayName("결제를 취소하면 환불되고, 원 결제 행은 그대로 둔 채 CANCEL 행이 추가된다")
+	void cancel() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 10_000).andExpect(status().isOk());
+		long payId = transactionId(pay(walletId, 3_000));
+
+		cancel(payId)
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.type", is("CANCEL")))
+				.andExpect(jsonPath("$.amount", is(3_000)))
+				.andExpect(jsonPath("$.balanceAfter", is(10_000)))
+				.andExpect(jsonPath("$.originalTransactionId", is((int) payId)));
+
+		mockMvc.perform(get("/api/wallets/{id}", walletId))
+				.andExpect(jsonPath("$.balance", is(10_000)));
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId))
+				.andExpect(jsonPath("$", hasSize(3)))
+				.andExpect(jsonPath("$[0].type", is("CANCEL")))
+				.andExpect(jsonPath("$[1].type", is("PAY")))
+				.andExpect(jsonPath("$[1].balanceAfter", is(7_000)));
+	}
+
+	@Test
+	@DisplayName("같은 결제를 두 번 취소 → 409, 두 번째는 환불 안 됨")
+	void cancelTwice() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 10_000).andExpect(status().isOk());
+		long payId = transactionId(pay(walletId, 3_000));
+		cancel(payId).andExpect(status().isOk());
+
+		cancel(payId)
+				.andExpect(status().isConflict())
+				.andExpect(jsonPath("$.code", is("ALREADY_CANCELED")));
+
+		mockMvc.perform(get("/api/wallets/{id}", walletId))
+				.andExpect(jsonPath("$.balance", is(10_000)));
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId))
+				.andExpect(jsonPath("$", hasSize(3)));
+	}
+
+	@Test
+	@DisplayName("충전 거래나 취소 거래를 취소 → 422")
+	void cancelNotPay() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		long chargeId = transactionId(charge(walletId, 10_000));
+		long cancelId = transactionId(cancel(transactionId(pay(walletId, 3_000))));
+
+		cancel(chargeId)
+				.andExpect(status().isUnprocessableEntity())
+				.andExpect(jsonPath("$.code", is("NOT_CANCELABLE")));
+		cancel(cancelId)
+				.andExpect(status().isUnprocessableEntity())
+				.andExpect(jsonPath("$.code", is("NOT_CANCELABLE")));
+	}
+
+	@Test
+	@DisplayName("없는 거래 취소 → 404")
+	void cancelNotFound() throws Exception {
+		cancel(999_999)
+				.andExpect(status().isNotFound())
+				.andExpect(jsonPath("$.code", is("TRANSACTION_NOT_FOUND")));
+	}
+
+	private ResultActions cancel(long transactionId) throws Exception {
+		return mockMvc.perform(post("/api/transactions/{id}/cancel", transactionId));
+	}
+
+	private long transactionId(ResultActions result) throws Exception {
+		String body = result.andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+		return objectMapper.readTree(body).get("transactionId").asLong();
+	}
+
 	private ResultActions pay(long walletId, long amount) throws Exception {
 		return mockMvc.perform(post("/api/wallets/{id}/pay", walletId).contentType(MediaType.APPLICATION_JSON)
 				.content("{\"amount\": " + amount + "}"));

@@ -51,6 +51,36 @@ Java 21 · Spring Boot 3.3.4 · Spring Data JPA · H2 (인메모리, MySQL 모�
   (지금은 락이 없어서 동시에 결제하면 둘 다 잔액 검사를 통과할 수 있다.)
 - 요청 DTO는 충전과 같은 `AmountRequest`를 쓴다.
 
+### 5. 취소
+
+- `POST /api/transactions/{transactionId}/cancel` — PAY 거래만 취소할 수 있고, 결제 금액만큼 환불한다.
+- 원 결제 행은 건드리지 않고 **CANCEL 행을 새로 추가**한다. CANCEL 행의 `originalTransactionId`가 원 결제를 가리킨다.
+- 이중 취소는 두 겹으로 막는다.
+  1. 서비스에서 `existsByOriginalTransactionId`로 확인 → 평소에는 여기서 409 `ALREADY_CANCELED`.
+  2. 동시에 두 요청이 1번을 같이 통과해도, `originalTransactionId`의 **unique 제약**이 두 번째 INSERT를 거절한다.
+     `saveAndFlush`로 그 자리에서 제약 위반을 잡아 409로 바꾸고, 예외로 트랜잭션이 롤백되니 환불도 반영되지 않는다.
+- 충전·취소 거래를 취소하려 하면 422 `NOT_CANCELABLE` (요청 형식은 맞지만 이 거래에는 할 수 없는 동작이라 422).
+- 2단계에서 만든 `status` 칼럼(`COMPLETED`/`CANCELED`)과 `TransactionStatus` enum은 이 단계에서 뺐다. 이유는 아래.
+
+#### 고민: 취소를 어떻게 기록할까 — A vs B
+
+| | A. 원 결제 행의 상태를 바꾼다 | B. 원장은 추가만 한다 (선택) |
+|---|---|---|
+| 취소 기록 | PAY 행 `status`: `COMPLETED → CANCELED` + CANCEL 행 | CANCEL 행만 추가, PAY 행은 그대로 |
+| 이중 취소 방지 | 상태를 읽고 → 확인하고 → 바꾸는 사이에 끼어들 수 있어서 **락이 필요** (8단계 락 안에서 상태 재확인) | `originalTransactionId` unique 제약 — **락 없이도 DB가 막는다** |
+| 원장 성격 | 과거 행이 나중에 바뀜 | 한 번 쌓인 행은 안 바뀜 (append-only) |
+| "이 결제 취소됐나?" | PAY 행 `status`만 보면 됨 | CANCEL 행이 있는지 봐야 함 (`existsByOriginalTransactionId`) |
+
+**B를 고른 이유**
+
+- **정합성을 락에만 기대지 않는다.** A는 락이 빠지거나 락 밖의 경로(배치, 관리자 도구 등)에서 취소하면 이중 환불이 난다.
+  B는 DB 제약이 최후 방어선이라, 락은 성능·순서 문제만 맡고 "두 번 환불"은 구조적으로 불가능하다.
+- **돈의 기록은 고치지 않고 쌓는다.** 회계 원장처럼 과거 행을 수정하지 않으면, 내역만으로 잔액이 어떻게 변해 왔는지 그대로 재현된다.
+  (`balanceAfter`도 그 시점의 값으로 남는다.)
+- **단점은 조회가 한 단계 늘어나는 것.** "취소됐나?"를 알려면 CANCEL 행을 찾아야 한다.
+  지금 규모에서는 unique 제약이 곧 인덱스라 비용이 거의 없다.
+- 2단계에서 미리 만든 `status` 칼럼은 B에서는 쓸 곳이 없어서 뺐다. 이미 push한 2단계 커밋은 고치지 않고, 이 단계의 변경으로 남긴다.
+
 ## API
 
 | 메서드 | 경로 | 설명 | 주요 에러 |
@@ -60,6 +90,7 @@ Java 21 · Spring Boot 3.3.4 · Spring Data JPA · H2 (인메모리, MySQL 모�
 | GET | `/api/wallets/{walletId}/transactions` | 거래 내역 (최신순) — 충전·결제·취소마다 한 줄씩 쌓인 원장 | 404 `WALLET_NOT_FOUND` |
 | POST | `/api/wallets/{walletId}/charge` | 충전 `{"amount": 10000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 404 |
 | POST | `/api/wallets/{walletId}/pay` | 결제 `{"amount": 3000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 422 `INSUFFICIENT_BALANCE`, 404 |
+| POST | `/api/transactions/{transactionId}/cancel` | 결제 취소 → 생성된 CANCEL 거래 | 404 `TRANSACTION_NOT_FOUND`, 409 `ALREADY_CANCELED`, 422 `NOT_CANCELABLE` |
 
 에러 응답 예시:
 

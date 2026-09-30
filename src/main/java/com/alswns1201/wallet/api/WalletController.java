@@ -52,6 +52,11 @@ public class WalletController {
 		return walletService.pay(walletId, request.amount());
 	}
 
+	@PostMapping("/transactions/{transactionId}/cancel")
+	public TransactionResponse cancel(@PathVariable Long transactionId) {
+		return walletService.cancel(transactionId);
+	}
+
 	public record CreateWalletRequest(@NotNull Long userId) {
 	}
 
