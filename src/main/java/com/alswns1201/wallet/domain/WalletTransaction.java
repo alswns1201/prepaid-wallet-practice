@@ -68,4 +68,9 @@ public class WalletTransaction {
 	public static WalletTransaction charge(Wallet wallet, long amount) {
 		return new WalletTransaction(wallet.getId(), TransactionType.CHARGE, amount, wallet.getBalance(), null);
 	}
+
+	/** 결제가 반영된 지갑으로 PAY 거래를 만든다. */
+	public static WalletTransaction pay(Wallet wallet, long amount) {
+		return new WalletTransaction(wallet.getId(), TransactionType.PAY, amount, wallet.getBalance(), null);
+	}
 }

@@ -47,6 +47,11 @@ public class WalletController {
 		return walletService.charge(walletId, request.amount());
 	}
 
+	@PostMapping("/wallets/{walletId}/pay")
+	public TransactionResponse pay(@PathVariable Long walletId, @Valid @RequestBody AmountRequest request) {
+		return walletService.pay(walletId, request.amount());
+	}
+
 	public record CreateWalletRequest(@NotNull Long userId) {
 	}
 

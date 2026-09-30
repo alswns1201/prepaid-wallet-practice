@@ -44,6 +44,14 @@ public class Wallet {
 		this.balance += amount;
 	}
 
+	public void pay(long amount) {
+		validateAmount(amount);
+		if (balance < amount) {
+			throw new WalletException(ErrorCode.INSUFFICIENT_BALANCE);
+		}
+		this.balance -= amount;
+	}
+
 	private static void validateAmount(long amount) {
 		if (amount <= 0) {
 			throw new WalletException(ErrorCode.INVALID_AMOUNT);

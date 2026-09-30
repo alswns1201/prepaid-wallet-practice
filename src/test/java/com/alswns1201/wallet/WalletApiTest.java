@@ -113,6 +113,62 @@ class WalletApiTest {
 				.andExpect(jsonPath("$.code", is("WALLET_NOT_FOUND")));
 	}
 
+	@Test
+	@DisplayName("결제하면 잔액이 줄고 PAY 거래가 쌓인다")
+	void pay() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 10_000).andExpect(status().isOk());
+
+		pay(walletId, 3_000)
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.type", is("PAY")))
+				.andExpect(jsonPath("$.amount", is(3_000)))
+				.andExpect(jsonPath("$.balanceAfter", is(7_000)));
+		// 잔액을 정확히 0원까지 쓰는 건 허용
+		pay(walletId, 7_000)
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.balanceAfter", is(0)));
+
+		mockMvc.perform(get("/api/wallets/{id}", walletId))
+				.andExpect(jsonPath("$.balance", is(0)));
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId))
+				.andExpect(jsonPath("$", hasSize(3)))
+				.andExpect(jsonPath("$[0].type", is("PAY")));
+	}
+
+	@Test
+	@DisplayName("잔액보다 큰 결제 → 422, 잔액·거래 변화 없음")
+	void payInsufficientBalance() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 5_000).andExpect(status().isOk());
+
+		pay(walletId, 5_001)
+				.andExpect(status().isUnprocessableEntity())
+				.andExpect(jsonPath("$.code", is("INSUFFICIENT_BALANCE")));
+
+		mockMvc.perform(get("/api/wallets/{id}", walletId))
+				.andExpect(jsonPath("$.balance", is(5_000)));
+		mockMvc.perform(get("/api/wallets/{id}/transactions", walletId))
+				.andExpect(jsonPath("$", hasSize(1)));
+	}
+
+	@ParameterizedTest
+	@ValueSource(longs = {0, -1_000})
+	@DisplayName("0원 이하 결제 → 400")
+	void payInvalidAmount(long amount) throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 5_000).andExpect(status().isOk());
+
+		pay(walletId, amount)
+				.andExpect(status().isBadRequest())
+				.andExpect(jsonPath("$.code", is("INVALID_AMOUNT")));
+	}
+
+	private ResultActions pay(long walletId, long amount) throws Exception {
+		return mockMvc.perform(post("/api/wallets/{id}/pay", walletId).contentType(MediaType.APPLICATION_JSON)
+				.content("{\"amount\": " + amount + "}"));
+	}
+
 	private ResultActions charge(long walletId, long amount) throws Exception {
 		return mockMvc.perform(post("/api/wallets/{id}/charge", walletId).contentType(MediaType.APPLICATION_JSON)
 				.content("{\"amount\": " + amount + "}"));

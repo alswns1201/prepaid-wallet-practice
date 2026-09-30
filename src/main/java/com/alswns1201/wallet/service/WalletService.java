@@ -36,6 +36,13 @@ public class WalletService {
 		return TransactionResponse.from(transactionRepository.save(WalletTransaction.charge(wallet, amount)));
 	}
 
+	@Transactional
+	public TransactionResponse pay(Long walletId, long amount) {
+		Wallet wallet = getWallet(walletId);
+		wallet.pay(amount);
+		return TransactionResponse.from(transactionRepository.save(WalletTransaction.pay(wallet, amount)));
+	}
+
 	@Transactional(readOnly = true)
 	public WalletResponse get(Long walletId) {
 		return WalletResponse.from(getWallet(walletId));
