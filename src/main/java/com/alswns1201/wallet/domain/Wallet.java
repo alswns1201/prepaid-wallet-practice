@@ -2,6 +2,9 @@ package com.alswns1201.wallet.domain;
 
 import java.time.LocalDateTime;
 
+import com.alswns1201.wallet.support.ErrorCode;
+import com.alswns1201.wallet.support.WalletException;
+
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.GeneratedValue;
@@ -34,5 +37,16 @@ public class Wallet {
 		this.userId = userId;
 		this.balance = 0;
 		this.createdAt = LocalDateTime.now();
+	}
+
+	public void charge(long amount) {
+		validateAmount(amount);
+		this.balance += amount;
+	}
+
+	private static void validateAmount(long amount) {
+		if (amount <= 0) {
+			throw new WalletException(ErrorCode.INVALID_AMOUNT);
+		}
 	}
 }

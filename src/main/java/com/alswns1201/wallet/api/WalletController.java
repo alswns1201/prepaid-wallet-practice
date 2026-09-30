@@ -42,6 +42,15 @@ public class WalletController {
 		return walletService.transactions(walletId);
 	}
 
+	@PostMapping("/wallets/{walletId}/charge")
+	public TransactionResponse charge(@PathVariable Long walletId, @Valid @RequestBody AmountRequest request) {
+		return walletService.charge(walletId, request.amount());
+	}
+
 	public record CreateWalletRequest(@NotNull Long userId) {
+	}
+
+	/** 금액 검증(0 이하 거절)은 도메인(Wallet)이 한다 — 에러 응답을 ProblemDetail 하나로 맞추기 위해 */
+	public record AmountRequest(@NotNull Long amount) {
 	}
 }

@@ -52,4 +52,20 @@ public class WalletTransaction {
 
 	@Column(nullable = false)
 	private LocalDateTime createdAt;
+
+	private WalletTransaction(Long walletId, TransactionType type, long amount, long balanceAfter,
+			Long originalTransactionId) {
+		this.walletId = walletId;
+		this.type = type;
+		this.amount = amount;
+		this.balanceAfter = balanceAfter;
+		this.status = TransactionStatus.COMPLETED;
+		this.originalTransactionId = originalTransactionId;
+		this.createdAt = LocalDateTime.now();
+	}
+
+	/** 충전이 반영된 지갑으로 CHARGE 거래를 만든다. */
+	public static WalletTransaction charge(Wallet wallet, long amount) {
+		return new WalletTransaction(wallet.getId(), TransactionType.CHARGE, amount, wallet.getBalance(), null);
+	}
 }

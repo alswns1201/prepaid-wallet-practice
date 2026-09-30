@@ -7,6 +7,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import com.alswns1201.wallet.domain.Wallet;
 import com.alswns1201.wallet.domain.WalletRepository;
+import com.alswns1201.wallet.domain.WalletTransaction;
 import com.alswns1201.wallet.domain.WalletTransactionRepository;
 import com.alswns1201.wallet.support.ErrorCode;
 import com.alswns1201.wallet.support.WalletException;
@@ -26,6 +27,13 @@ public class WalletService {
 			throw new WalletException(ErrorCode.DUPLICATE_WALLET);
 		}
 		return WalletResponse.from(walletRepository.save(new Wallet(userId)));
+	}
+
+	@Transactional
+	public TransactionResponse charge(Long walletId, long amount) {
+		Wallet wallet = getWallet(walletId);
+		wallet.charge(amount);
+		return TransactionResponse.from(transactionRepository.save(WalletTransaction.charge(wallet, amount)));
 	}
 
 	@Transactional(readOnly = true)
