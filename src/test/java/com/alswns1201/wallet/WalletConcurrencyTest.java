@@ -32,10 +32,13 @@ class WalletConcurrencyTest {
 	void concurrentChargeWithoutLock() throws InterruptedException {
 		Long walletId = walletService.create(USER_SEQ.incrementAndGet()).walletId();
 
+		// 1_000 == 1000. 숫자 사이의 밑줄은 자릿수를 읽기 쉽게 하는 구분자일 뿐 값에는 영향이 없다 (Java 7+)
 		Result result = ConcurrentRunner.run(REQUESTS, i -> walletService.charge(walletId, 1_000));
 
 		long balance = walletService.get(walletId).balance();
 		List<TransactionResponse> charges = walletService.transactions(walletId);
+		// 100개 CHARGE 행의 balanceAfter 중 서로 다른 값이 몇 개인지.
+		// 차례로 반영됐다면 1,000 / 2,000 / … / 100,000 으로 전부 달라서 100개여야 한다.
 		long distinctBalanceAfter = charges.stream().mapToLong(TransactionResponse::balanceAfter).distinct().count();
 		System.out.printf(">>> 성공 %d건 → 기대 잔액 %,d원 / 실제 잔액 %,d원%n", result.success(), result.success() * 1_000L, balance);
 		System.out.printf(">>> CHARGE 행 %d줄, balanceAfter 서로 다른 값 %d개 (같은 잔액을 동시에 읽은 흔적)%n",
@@ -45,7 +48,10 @@ class WalletConcurrencyTest {
 		assertThat(charges).hasSize(result.success());
 		// 그런데 잔액은 서로의 갱신을 덮어써서 성공 건수만큼 늘지 않았다
 		assertThat(balance).isLessThan(result.success() * 1_000L);
-		// 락이 없으니 balanceAfter가 겹치는 행이 생긴다
+		// 원인 쪽 증거: "서로 다른 값 개수 < 행 개수" = 겹치는 balanceAfter가 적어도 하나 있다
+		// = 여러 요청이 같은 잔액(예: 0원)을 읽고 각자 +1,000 해서 1,000원으로 덮어썼다.
+		// (위 잔액 검증은 "돈이 사라졌다"는 결과, 이 검증은 "같은 잔액을 동시에 읽었다"는 원인을 본다.
+		//  락을 넣는 8단계에서는 반대로 isEqualTo(charges.size()) — 전부 달라야 한다 — 로 바뀐다.)
 		assertThat(distinctBalanceAfter).isLessThan(charges.size());
 	}
 }

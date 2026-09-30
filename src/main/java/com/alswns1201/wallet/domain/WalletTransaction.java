@@ -39,7 +39,13 @@ public class WalletTransaction {
 	@Column(nullable = false)
 	private long amount;
 
-	/** 거래 직후 잔액 */
+	/**
+	 * 이 거래가 반영된 직후의 지갑 잔액 (통장의 "잔액" 칸). amount가 "얼마가 움직였나"라면 이건 "그래서 얼마가 남았나".
+	 * 예) CHARGE 10,000 → 10,000 / PAY 3,000 → 7,000 / CANCEL 3,000 → 10,000
+	 * - 순서대로 보면 "직전 balanceAfter ± amount = 이번 balanceAfter"가 항상 맞아야 한다 → 원장 검증(대사)에 쓴다.
+	 * - 동시 요청이 같은 잔액을 읽고 덮어쓰면(lost update) 여러 행에 같은 값이 찍힌다 → 동시성 문제의 흔적.
+	 * - 원장은 추가만 하므로 한 번 찍힌 값은 바뀌지 않는다 (결제를 취소해도 PAY 행의 값은 "그때 잔액"으로 남는다).
+	 */
 	@Column(nullable = false)
 	private long balanceAfter;
 
