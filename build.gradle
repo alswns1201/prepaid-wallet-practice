@@ -13,6 +13,9 @@ java {
 	}
 }
 
+// Docker Desktop 29+ 는 Docker API 1.44 이상만 받으므로 Boot 3.3.4 기본(1.19.x)보다 높은 Testcontainers 사용
+ext['testcontainers.version'] = '1.21.3'
+
 repositories {
 	mavenCentral()
 }
@@ -21,17 +24,22 @@ dependencies {
 	implementation 'org.springframework.boot:spring-boot-starter-web'
 	implementation 'org.springframework.boot:spring-boot-starter-validation'
 	implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+	implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+	implementation 'org.redisson:redisson-spring-boot-starter:3.37.0'
 	runtimeOnly 'com.h2database:h2'
 
 	compileOnly 'org.projectlombok:lombok'
 	annotationProcessor 'org.projectlombok:lombok'
 
 	testImplementation 'org.springframework.boot:spring-boot-starter-test'
+	testImplementation 'org.testcontainers:junit-jupiter'
 	testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
 }
 
 tasks.named('test') {
 	useJUnitPlatform()
+	// docker-java 기본 API 버전이 Docker Desktop 최소 지원 버전(1.40)보다 낮아서 400이 나는 문제 회피
+	systemProperty 'api.version', '1.44'
 	testLogging {
 		events 'passed', 'failed', 'skipped'
 		showStandardStreams = true

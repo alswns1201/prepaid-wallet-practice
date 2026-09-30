@@ -11,11 +11,12 @@
 
 ## 스택
 
-Java 21 · Spring Boot 3.3.4 · Spring Data JPA · H2 (인메모리, MySQL 모드) · Lombok
+Java 21 · Spring Boot 3.3.4 · Spring Data JPA · H2 (인메모리, MySQL 모드) · Lombok · Redis (Spring Data Redis, Redisson) · Testcontainers
 
 ```bash
-./gradlew test      # 테스트
-./gradlew bootRun   # 서버 실행 (http://localhost:8080)
+./gradlew test            # 테스트 — Docker가 켜져 있어야 한다 (Testcontainers가 Redis를 띄움)
+docker compose up -d      # 로컬 Redis (bootRun 할 때만 필요)
+./gradlew bootRun         # 서버 실행 (http://localhost:8080)
 ```
 
 ## 단계별 진행
@@ -110,6 +111,32 @@ API는 그대로 동기다. 바뀌는 건 테스트가 **같은 지갑에 요청
 - 테스트는 "깨진다"를 검증한다: `잔액 < 성공 건수 × 1,000원`. 8단계에서 락을 넣고 정확히 100,000원을 검증하도록 바꾼다.
 - 참고: 처음 실행했을 때 한 번 `DataIntegrityViolationException` 2건이 섞여 나왔고, 이후 30번 넘게 다시 돌려도 재현되지 않았다.
   H2가 동시 갱신 충돌을 이렇게 보고한 것으로 추정한다. 검증은 성공 건수를 기준으로 하므로 결과에는 영향이 없다.
+
+### 7. Redis 설정
+
+6단계의 lost update를 풀 도구(지갑 락, 일일 한도, 멱등성 키)가 전부 Redis 위에서 돌아가서, 먼저 Redis를 붙인다. 이 단계에서는 연결만 한다.
+
+- 의존성
+  - `spring-boot-starter-data-redis` — `StringRedisTemplate`(Lettuce). 9~11단계의 일일 한도·Lua·멱등성 키에서 쓴다.
+  - `redisson-spring-boot-starter` — 8단계 지갑 락(`RLock`)에서 쓴다. 락 대기, 자동 연장(watchdog)을 직접 구현하지 않으려고.
+- `docker-compose.yml` — 로컬 `bootRun`용 Redis (`redis:7-alpine`, 6379).
+- 테스트는 **Testcontainers**로 진짜 Redis를 띄운다 (`IntegrationTestSupport`).
+  - 모든 테스트 클래스가 컨테이너 하나를 공유한다 (싱글턴 컨테이너 패턴: `static` 블록에서 한 번 `start()`).
+  - 컨테이너가 빈 포트에 뜨므로 `@DynamicPropertySource`로 실제 host/port를 넣어 준다.
+  - Redisson은 시작할 때 바로 Redis에 접속한다. 그래서 이제 `@SpringBootTest` 테스트는 전부 이 부모를 상속한다.
+    `@DataJpaTest`(제약 테스트)는 JPA 빈만 띄워서 상관없다.
+- `RedisConnectionTest` — 두 클라이언트(`StringRedisTemplate`, `RedissonClient`)가 모두 붙는지 쓰기/읽기로 확인.
+  기존 `contextLoads` 테스트는 이 테스트가 역할을 대신해서 지웠다.
+
+**삽질: Docker Desktop 29 + Testcontainers**
+
+Boot 3.3.4가 관리하는 Testcontainers(1.19.x)는 Docker Desktop 29에서 `Status 400`으로 Docker를 못 찾는다.
+Docker Desktop 29는 Docker API 1.44 이상만 받는데, 예전 docker-java는 더 낮은 버전으로 요청하기 때문이다. `build.gradle`에서 두 가지로 해결했다.
+
+```groovy
+ext['testcontainers.version'] = '1.21.3'                 // Testcontainers 올리기
+tasks.named('test') { systemProperty 'api.version', '1.44' }  // docker-java API 버전 고정
+```
 
 ## API
 

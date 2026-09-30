@@ -8,7 +8,6 @@ import java.util.concurrent.atomic.AtomicLong;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
 
 import com.alswns1201.wallet.ConcurrentRunner.Result;
 import com.alswns1201.wallet.service.TransactionResponse;
@@ -18,8 +17,7 @@ import com.alswns1201.wallet.service.WalletService;
  * 동시 요청 테스트. 테스트 메서드에 @Transactional을 붙이지 않는다 —
  * 요청마다 자기 트랜잭션에서 커밋돼야 실제 서버에 요청이 몰린 상황과 같아진다.
  */
-@SpringBootTest
-class WalletConcurrencyTest {
+class WalletConcurrencyTest extends IntegrationTestSupport {
 
 	private static final int REQUESTS = 100;
 	private static final AtomicLong USER_SEQ = new AtomicLong(1_000_000);

@@ -1,0 +1,6 @@
+# 로컬에서 bootRun 할 때 쓰는 Redis. 테스트는 Testcontainers가 따로 띄우므로 필요 없다.
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"

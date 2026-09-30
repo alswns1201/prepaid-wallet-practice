@@ -6,3 +6,7 @@ spring:
     hibernate:
       ddl-auto: create-drop
     open-in-view: false
+  data:
+    redis:
+      host: localhost
+      port: 6379
