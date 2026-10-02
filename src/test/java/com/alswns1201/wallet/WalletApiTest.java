@@ -7,6 +7,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+import java.time.LocalDate;
 import java.util.concurrent.atomic.AtomicLong;
 
 import org.junit.jupiter.api.DisplayName;
@@ -160,6 +161,23 @@ class WalletApiTest extends IntegrationTestSupport {
 		pay(walletId, amount)
 				.andExpect(status().isBadRequest())
 				.andExpect(jsonPath("$.code", is("INVALID_AMOUNT")));
+	}
+
+	@Test
+	@DisplayName("하루 결제 한도(1,000,000원)를 넘는 결제 → 422 DAILY_LIMIT_EXCEEDED, 결제한 날이 businessDate로 찍힌다")
+	void payOverDailyLimit() throws Exception {
+		long walletId = createWallet(USER_SEQ.incrementAndGet());
+		charge(walletId, 2_000_000).andExpect(status().isOk());
+
+		pay(walletId, 1_000_000)
+				.andExpect(status().isOk())
+				.andExpect(jsonPath("$.businessDate", is(LocalDate.now(clock).toString())));
+		pay(walletId, 1)
+				.andExpect(status().isUnprocessableEntity())
+				.andExpect(jsonPath("$.code", is("DAILY_LIMIT_EXCEEDED")));
+
+		mockMvc.perform(get("/api/wallets/{id}", walletId))
+				.andExpect(jsonPath("$.balance", is(1_000_000)));
 	}
 
 	@Test

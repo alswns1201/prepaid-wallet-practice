@@ -1,5 +1,6 @@
 package com.alswns1201.wallet.domain;
 
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 
 import jakarta.persistence.Column;
@@ -57,33 +58,45 @@ public class WalletTransaction {
 	@Column(unique = true)
 	private Long originalTransactionId;
 
+	/**
+	 * 일일 한도를 어느 날짜로 셌는지 (KST 기준 "결제한 날").
+	 * - PAY: 결제한 날. 그날의 한도 키에 금액이 더해졌다.
+	 * - CANCEL: 원 결제의 날짜를 그대로 복사한다 → 그날의 한도를 돌려줬다는 뜻.
+	 *   어제 결제를 오늘 취소하면 어제 한도를 돌려줘야 하는데, 원 결제의 날짜를 모르면 오늘 한도를 잘못 늘리게 된다.
+	 * - CHARGE: 한도와 상관없어 NULL.
+	 * createdAt에서 날짜를 뽑지 않는 이유: createdAt은 서버 시계라 테스트에서 날짜를 고정할 수 없고 서버 타임존에 따라 달라진다.
+	 */
+	private LocalDate businessDate;
+
 	@Column(nullable = false)
 	private LocalDateTime createdAt;
 
 	private WalletTransaction(Long walletId, TransactionType type, long amount, long balanceAfter,
-			Long originalTransactionId) {
+			Long originalTransactionId, LocalDate businessDate) {
 		this.walletId = walletId;
 		this.type = type;
 		this.amount = amount;
 		this.balanceAfter = balanceAfter;
 		this.originalTransactionId = originalTransactionId;
+		this.businessDate = businessDate;
 		this.createdAt = LocalDateTime.now();
 	}
 
 	/** 충전이 반영된 지갑으로 CHARGE 거래를 만든다. */
 	public static WalletTransaction charge(Wallet wallet, long amount) {
-		return new WalletTransaction(wallet.getId(), TransactionType.CHARGE, amount, wallet.getBalance(), null);
+		return new WalletTransaction(wallet.getId(), TransactionType.CHARGE, amount, wallet.getBalance(), null, null);
 	}
 
-	/** 결제가 반영된 지갑으로 PAY 거래를 만든다. */
-	public static WalletTransaction pay(Wallet wallet, long amount) {
-		return new WalletTransaction(wallet.getId(), TransactionType.PAY, amount, wallet.getBalance(), null);
+	/** 결제가 반영된 지갑으로 PAY 거래를 만든다. businessDate는 일일 한도를 센 날짜. */
+	public static WalletTransaction pay(Wallet wallet, long amount, LocalDate businessDate) {
+		return new WalletTransaction(wallet.getId(), TransactionType.PAY, amount, wallet.getBalance(), null,
+				businessDate);
 	}
 
-	/** 환불이 반영된 지갑으로, 원 결제를 가리키는 CANCEL 거래를 만든다. */
+	/** 환불이 반영된 지갑으로, 원 결제를 가리키는 CANCEL 거래를 만든다. businessDate는 원 결제의 날짜를 물려받는다. */
 	public static WalletTransaction cancelOf(WalletTransaction original, Wallet wallet) {
 		return new WalletTransaction(wallet.getId(), TransactionType.CANCEL, original.getAmount(), wallet.getBalance(),
-				original.getId());
+				original.getId(), original.getBusinessDate());
 	}
 
 	public boolean isPay() {

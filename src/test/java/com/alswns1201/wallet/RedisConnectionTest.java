@@ -7,13 +7,9 @@ import org.junit.jupiter.api.Test;
 import org.redisson.api.RBucket;
 import org.redisson.api.RedissonClient;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.data.redis.core.StringRedisTemplate;
 
 /** 두 클라이언트가 모두 Testcontainers의 Redis에 붙는지 확인한다. */
 class RedisConnectionTest extends IntegrationTestSupport {
-
-	@Autowired
-	StringRedisTemplate redisTemplate;
 
 	@Autowired
 	RedissonClient redissonClient;

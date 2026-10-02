@@ -15,6 +15,7 @@ public enum ErrorCode {
 	INSUFFICIENT_BALANCE(HttpStatus.UNPROCESSABLE_ENTITY, "잔액이 부족합니다."),
 	NOT_CANCELABLE(HttpStatus.UNPROCESSABLE_ENTITY, "결제 거래만 취소할 수 있습니다."),
 	ALREADY_CANCELED(HttpStatus.CONFLICT, "이미 취소된 거래입니다."),
+	DAILY_LIMIT_EXCEEDED(HttpStatus.UNPROCESSABLE_ENTITY, "오늘 결제 한도를 넘었습니다."),
 	LOCK_TIMEOUT(HttpStatus.SERVICE_UNAVAILABLE, "요청이 몰려 처리하지 못했습니다. 잠시 후 다시 시도해주세요.");
 
 	private final HttpStatus status;

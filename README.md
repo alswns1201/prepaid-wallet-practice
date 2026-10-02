@@ -243,6 +243,107 @@ Controller ─ 생성·조회 ──────▶ WalletService (락 불필요
   테스트에서는 **락 해제 후 커밋 전에 후처리 10ms**(`Thread.sleep`)를 넣어 그 상황을 만들었고, 그러면 매번 크게 깨진다.
   즉 "대부분 괜찮아 보이지만 가끔 돈이 사라지는" 버그라서 더 위험하다.
 
+### 9. 일일 결제 한도 — 락 안에서 GET → 비교 → INCRBY
+
+지갑마다 **하루 결제 합계가 1,000,000원**(`wallet.daily-pay-limit`)을 넘지 못하게 한다.
+이 단계는 일부러 **원자적이지 않은 방식**(GET → 비교 → INCRBY 세 번의 명령)으로 만든다.
+8단계의 지갑 락 안에서만 부르니 지금은 안전하다. 10단계에서 이걸 락 밖에서 부르면 뚫리는 것을 보이고 Lua로 바꾼다.
+
+#### 한도를 Redis 키 하나에 누적한다
+
+```
+wallet:daily:{walletId}:{yyyyMMdd}   예) wallet:daily:1:20261002 = "600000"
+```
+
+- 날짜가 키에 들어 있어서 **자정이 지나면 새 키**를 쓴다. "한도 초기화" 배치가 필요 없다.
+- 지난 키는 TTL(2일)로 알아서 사라진다. 하루가 아니라 2일인 이유는 자정 직전 결제를 다음 날 취소할 때 키가 남아 있어야 해서.
+- 하루를 자르는 기준은 **KST**. 서버 타임존에 따라 날짜가 달라지지 않도록 `Clock` 빈(`ClockConfig`, `Asia/Seoul`)에서 "오늘"을 받는다.
+  `LocalDate.now()`를 직접 부르지 않고 빈으로 둔 건 테스트에서 날짜를 바꿔 끼우기 위해서다.
+
+`DailyLimitManager.reserve()`
+
+```java
+long used = used(walletId, date);                     // 1. GET
+if (used + amount > dailyPayLimit) {                  // 2. 비교 (자바에서)
+    throw new WalletException(DAILY_LIMIT_EXCEEDED);  //    → 422
+}
+redisTemplate.opsForValue().increment(key, amount);   // 3. INCRBY
+```
+
+1~3 사이에 다른 요청이 끼어들 수 있다. 두 요청이 동시에 GET 하면 둘 다 "아직 여유 있음"을 보고 둘 다 INCRBY 한다 —
+6단계 lost update와 같은 모양의 문제다. 지금은 **지갑 락 안에서만** 부르니 같은 지갑 요청은 한 번에 하나씩이라 끼어들 틈이 없다.
+
+#### 결제 흐름 — 한도는 트랜잭션 밖에서, 보상은 직접
+
+```
+WalletFacade.pay
+ └ 락 획득
+    ├ DailyLimitManager.reserve    한도 차지 (Redis INCRBY)
+    ├ WalletService.pay            결제 트랜잭션 (DB)
+    │   └ 실패(잔액 부족 등) → DailyLimitManager.release (DECRBY)로 되돌림 → 예외 그대로 던짐
+ └ 락 해제
+```
+
+- **Redis는 DB 트랜잭션에 묶이지 않는다.** 결제가 잔액 부족으로 실패하면 DB는 롤백되지만 Redis에 더한 금액은 그대로 남는다.
+  그대로 두면 "결제는 안 됐는데 한도만 줄어든" 상태가 된다 → `catch`에서 `release`로 되돌린다 (**보상**).
+- 고민: 보상을 `WalletService`(트랜잭션 안)에 둘 수도 있었다. 하지만 트랜잭션 안에서는 커밋이 실패하는 경우를 잡을 수 없고,
+  "DB 트랜잭션에 안 묶이는 것은 트랜잭션 밖에서 다룬다"가 더 분명해서 **Facade**에 뒀다. `WalletService.pay`는 `businessDate` 인자만 늘었다.
+- 한도 확인을 결제보다 **먼저** 하는 이유: 결제를 먼저 하고 한도를 나중에 보면, 초과일 때 이미 커밋된 결제를 되돌려야 한다.
+  한도는 Redis 값 하나만 되돌리면 되니 "먼저 차지하고, 실패하면 돌려준다"가 훨씬 단순하다.
+
+#### 취소 — 원래 결제한 날의 한도를 돌려준다 (`businessDate`)
+
+결제를 취소하면 그 금액만큼 한도가 돌아와야 한다. 문제는 **어느 날의 한도**냐다.
+
+```
+10/1 23:50  300,000원 결제   → wallet:daily:1:20261001 = 300,000
+10/2 09:00  200,000원 결제   → wallet:daily:1:20261002 = 200,000
+10/2 09:10  10/1 결제 취소   → 20261001 키에서 빼야 한다. 오늘(20261002) 키에서 빼면 오늘 한도가 공짜로 늘어난다
+```
+
+그래서 `WalletTransaction`에 **`businessDate`**(일일 한도를 센 날짜) 칼럼을 추가했다.
+
+| 거래 | `businessDate` |
+|---|---|
+| PAY | 결제한 날 — 그날의 한도 키에 더해졌다 |
+| CANCEL | 원 결제의 날짜를 **그대로 복사** — 그날의 한도를 돌려줬다는 뜻 |
+| CHARGE | `null` (한도와 상관없음) |
+
+- `createdAt`에서 날짜를 뽑지 않은 이유: `createdAt`은 서버 시계(`LocalDateTime.now()`)라 테스트에서 날짜를 고정할 수 없고 서버 타임존을 탄다.
+  "한도를 어느 날로 셌는가"는 비즈니스 규칙이라 따로 기록하는 게 맞다고 봤다.
+- 응답(`TransactionResponse`)에도 `businessDate`가 나간다.
+- 취소 흐름: 락 → `WalletService.cancel` (커밋) → `release(walletId, 금액, 취소 거래의 businessDate)`.
+- 고민: 취소가 커밋된 **뒤에** 한도 반환이 실패하면? 예외를 던지면 사용자는 "취소 실패"로 보지만 실제로는 환불된 상태가 된다.
+  한도 반환이 빠지는 쪽(그날 한도를 조금 덜 쓰게 됨)이 덜 위험하다고 보고, **로그만 남기고 성공으로 응답**한다.
+
+#### 테스트
+
+모든 `@SpringBootTest`가 Redis 컨테이너 하나를 같이 쓰고, 지갑 ID는 컨텍스트마다 1부터 다시 시작한다.
+그래서 다른 테스트가 남긴 `wallet:daily:1:...` 키를 이어받지 않도록 `IntegrationTestSupport`에 두 가지를 추가했다.
+
+- `@BeforeEach`에서 Redis `FLUSHALL` + 시계 초기화
+- `TestClock` — `setDate(날짜)`로 "오늘"을 바꿀 수 있는 시계. `@Primary` 빈으로 운영 `Clock` 대신 주입된다.
+  "어제 결제 → 오늘 취소"를 하루 기다리지 않고 만든다.
+
+`DailyLimitTest` (한도 1,000,000원)
+
+| 테스트 | 확인하는 것 |
+|---|---|
+| 한도 초과 | 600,000 + 400,000원(정확히 한도)까지 성공, 1원 더 → 422 `DAILY_LIMIT_EXCEEDED`, 잔액 그대로 |
+| 결제 실패 보상 | 잔액 1,000원에 5,000원 결제 → `INSUFFICIENT_BALANCE`, 한도 사용액 **0원** (보상이 없으면 5,000원이 남는다) |
+| 취소하면 한도 반환 | 한도를 꽉 채운 뒤 취소 → 사용액 0원, 다시 1,000,000원 결제 가능 |
+| 어제 결제를 오늘 취소 | 어제 300,000 / 오늘 200,000 결제 후 어제 것 취소 → 어제 사용액 0원, **오늘은 200,000원 그대로** |
+| 날짜가 바뀌면 새 한도 | 어제 한도를 다 써도 오늘은 결제 가능 |
+| **동시 결제 (락 안)** | 20,000원 결제 100건 동시 → **정확히 50건 성공**, 50건 `DAILY_LIMIT_EXCEEDED`, 사용액 정확히 1,000,000원 |
+
+```
+>>> [일일 한도, 락 안] 성공 50건 / 한도 초과 50건 → 사용액 1,000,000원 (한도 1,000,000원)
+```
+
+- 동시 결제 테스트는 5번 반복해서 매번 같은 결과였다. 잔액(3,000,000원)은 충분하니 실패는 전부 한도 때문이다.
+- `WalletApiTest`에는 API 응답 확인용으로 한 개 추가: 한도 초과 422 응답의 `code`와, 결제 응답의 `businessDate`.
+- 이 결과는 **락 덕분**이다. 10단계에서 같은 테스트를 락 없이 `reserve`만 동시에 부르면 50건을 넘겨 통과하는 것을 보인다.
+
 ## API
 
 | 메서드 | 경로 | 설명 | 주요 에러 |
@@ -251,8 +352,8 @@ Controller ─ 생성·조회 ──────▶ WalletService (락 불필요
 | GET | `/api/wallets/{walletId}` | 지갑 조회 (잔액) | 404 `WALLET_NOT_FOUND` |
 | GET | `/api/wallets/{walletId}/transactions` | 거래 내역 (최신순) — 충전·결제·취소마다 한 줄씩 쌓인 원장 | 404 `WALLET_NOT_FOUND` |
 | POST | `/api/wallets/{walletId}/charge` | 충전 `{"amount": 10000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 404, 503 `LOCK_TIMEOUT` |
-| POST | `/api/wallets/{walletId}/pay` | 결제 `{"amount": 3000}` → 생성된 거래 | 400 `INVALID_AMOUNT`, 422 `INSUFFICIENT_BALANCE`, 404, 503 `LOCK_TIMEOUT` |
-| POST | `/api/transactions/{transactionId}/cancel` | 결제 취소 → 생성된 CANCEL 거래 | 404 `TRANSACTION_NOT_FOUND`, 409 `ALREADY_CANCELED`, 422 `NOT_CANCELABLE`, 503 `LOCK_TIMEOUT` |
+| POST | `/api/wallets/{walletId}/pay` | 결제 `{"amount": 3000}` → 생성된 거래 (`businessDate` = 결제한 날). 하루 합계 1,000,000원까지 | 400 `INVALID_AMOUNT`, 422 `INSUFFICIENT_BALANCE`, 422 `DAILY_LIMIT_EXCEEDED`, 404, 503 `LOCK_TIMEOUT` |
+| POST | `/api/transactions/{transactionId}/cancel` | 결제 취소 → 생성된 CANCEL 거래. 원 결제한 날의 일일 한도를 돌려준다 | 404 `TRANSACTION_NOT_FOUND`, 409 `ALREADY_CANCELED`, 422 `NOT_CANCELABLE`, 503 `LOCK_TIMEOUT` |
 
 에러 응답 예시:
 

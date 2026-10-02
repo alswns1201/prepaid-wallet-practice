@@ -1,5 +1,6 @@
 package com.alswns1201.wallet.service;
 
+import java.time.LocalDate;
 import java.util.List;
 
 import org.springframework.dao.DataIntegrityViolationException;
@@ -41,11 +42,12 @@ public class WalletService {
 		return TransactionResponse.from(transactionRepository.save(WalletTransaction.charge(wallet, amount)));
 	}
 
+	/** businessDate: 일일 한도를 센 날짜. 한도 확인은 WalletFacade가 이 트랜잭션 밖(락 안)에서 먼저 한다. */
 	@Transactional
-	public TransactionResponse pay(Long walletId, long amount) {
+	public TransactionResponse pay(Long walletId, long amount, LocalDate businessDate) {
 		Wallet wallet = getWallet(walletId);
 		wallet.pay(amount);
-		return TransactionResponse.from(transactionRepository.save(WalletTransaction.pay(wallet, amount)));
+		return TransactionResponse.from(transactionRepository.save(WalletTransaction.pay(wallet, amount, businessDate)));
 	}
 
 	/**

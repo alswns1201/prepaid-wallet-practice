@@ -12,5 +12,6 @@ spring:
       port: 6379
 
 wallet:
+  daily-pay-limit: 1000000   # 지갑별 하루 결제 한도(원). 넘으면 422 DAILY_LIMIT_EXCEEDED
   lock:
     wait-millis: 5000   # 지갑 락을 기다리는 최대 시간. 넘기면 503 LOCK_TIMEOUT

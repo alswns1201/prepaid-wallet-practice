@@ -3,6 +3,8 @@ package com.alswns1201.wallet;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.time.LocalDate;
+
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -33,7 +35,7 @@ class WalletTransactionConstraintTest {
 		Wallet wallet = walletRepository.save(new Wallet(1L));
 		wallet.charge(10_000);
 		wallet.pay(3_000);
-		WalletTransaction pay = transactionRepository.save(WalletTransaction.pay(wallet, 3_000));
+		WalletTransaction pay = transactionRepository.save(WalletTransaction.pay(wallet, 3_000, LocalDate.now()));
 
 		transactionRepository.saveAndFlush(WalletTransaction.cancelOf(pay, wallet));
 
