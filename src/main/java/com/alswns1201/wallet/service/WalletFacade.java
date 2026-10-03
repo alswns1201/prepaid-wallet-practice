@@ -34,7 +34,7 @@ public class WalletFacade {
 	}
 
 	/**
-	 * 락 안에서: 한도 차지(GET → 비교 → INCRBY) → 결제 트랜잭션.
+	 * 락 안에서: 한도 차지(Lua 스크립트) → 결제 트랜잭션.
 	 * 결제가 실패하면(잔액 부족 등) DB는 롤백되지만 Redis에 더한 금액은 남으므로 release로 되돌린다 (보상).
 	 */
 	public TransactionResponse pay(Long walletId, long amount) {
