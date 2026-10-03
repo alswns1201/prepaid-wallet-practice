@@ -343,6 +343,99 @@ WalletFacade.pay
 - 동시 결제 테스트는 5번 반복해서 매번 같은 결과였다. 잔액(3,000,000원)은 충분하니 실패는 전부 한도 때문이다.
 - `WalletApiTest`에는 API 응답 확인용으로 한 개 추가: 한도 초과 422 응답의 `code`와, 결제 응답의 `businessDate`.
 - 이 결과는 **락 덕분**이다. 10단계에서 같은 테스트를 락 없이 `reserve`만 동시에 부르면 50건을 넘겨 통과하는 것을 보인다.
+  (10단계 이후 이 테스트의 이름은 `[지갑 락 + Lua]`로 바뀌었다)
+
+### 10. 일일 한도를 Lua 스크립트로 — 락이 없어도 한도를 지킨다
+
+9단계의 한도가 정확했던 건 **지갑 락 덕분**이었다. `reserve` 자체는 GET → 비교 → INCRBY 세 명령으로 나뉘어 있어서,
+락 없이 동시에 부르면 사이에 다른 요청이 끼어든다. 이 세 단계를 **Lua 스크립트 하나로 묶어 Redis에 보낸다.**
+
+#### 왜 Lua인가
+
+Redis는 명령을 한 스레드에서 하나씩 처리하고, Lua 스크립트 하나도 "명령 하나"로 취급한다.
+스크립트가 도는 동안 다른 요청은 기다리므로 중간에 끼어들 수 없다.
+
+```
+9단계 (명령 3개):
+요청 A:  GET → 98만   비교 OK            INCRBY → 100만
+요청 B:        GET → 98만   비교 OK            INCRBY → 102만  ❌
+
+10단계 (스크립트 1개):
+요청 A:  [GET → 비교 → INCRBY] → 100만
+요청 B:                          [GET → 100만, 비교 102 > 100 → -1] ✅
+```
+
+Redis에는 "비교하고 나서 더하기"를 한 번에 해 주는 명령이 없다 (`INCRBY`는 무조건 더한다). 그래서 Lua로 묶는다.
+
+#### 스크립트 — `src/main/resources/scripts/daily_limit_reserve.lua`
+
+```lua
+local used   = tonumber(redis.call('GET', KEYS[1]) or '0')   -- 1. GET (키가 없으면 0)
+local amount = tonumber(ARGV[1])
+local limit  = tonumber(ARGV[2])
+
+if used + amount > limit then                                -- 2. 비교
+    return -1                                                --    초과면 아무것도 쓰지 않고 -1
+end
+
+local total = redis.call('INCRBY', KEYS[1], amount)          -- 3. INCRBY
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return total
+```
+
+- **9단계 자바 코드와 하는 일은 같다.** 실행되는 곳만 Redis 안으로 옮겼다.
+- `KEYS`에는 키 이름, `ARGV`에는 값(금액·한도·TTL)을 넘긴다. 둘 다 1부터 시작하고, ARGV는 문자열이라 `tonumber()`가 필요하다.
+- `redis.call()`은 스크립트 안에서 Redis 명령을 부르는 방법이다.
+
+#### 자바 쪽 — `DailyLimitManager.reserve()`
+
+```java
+private static final RedisScript<Long> RESERVE_SCRIPT =
+        RedisScript.of(new ClassPathResource("scripts/daily_limit_reserve.lua"), Long.class);
+
+Long result = redisTemplate.execute(RESERVE_SCRIPT,
+        List.of(key(walletId, date)),             // KEYS[1]
+        String.valueOf(amount),                   // ARGV[1]
+        String.valueOf(dailyPayLimit),            // ARGV[2]
+        String.valueOf(KEY_TTL.toSeconds()));     // ARGV[3]
+if (result == null || result == -1) {
+    throw new WalletException(DAILY_LIMIT_EXCEEDED);
+}
+```
+
+- 바뀐 건 `reserve()` 안쪽뿐이다. `WalletFacade`(락 → reserve → 결제 → 실패 시 release)는 그대로다.
+- `execute`는 먼저 `EVALSHA`(스크립트 해시로 실행)를 시도하고, Redis에 스크립트가 없으면 `EVAL`(본문 전송)로 다시 보낸다. 직접 신경 쓸 필요 없다.
+- `release`는 그대로 `DECRBY` 하나다. 명령 하나는 원래 원자적이고 읽고 비교하는 단계가 없으니 Lua가 필요 없다.
+
+#### 고민한 점
+
+- **여기서 "원자적"은 "끼어들 수 없다"는 뜻이지, 롤백한다는 뜻이 아니다.** Lua는 중간에 에러가 나도 앞에서 실행한 명령을 되돌리지 않는다.
+  그래서 스크립트는 **검사를 먼저 다 하고, 값을 바꾸는 명령은 마지막에** 둔다. 한도를 넘으면 아무것도 쓰지 않고 `-1`만 돌려준다.
+- **지갑 락은 그대로 둔다.** Lua가 지키는 건 Redis 안의 한도 카운터뿐이다. 잔액·원장은 DB에 있고, 락을 빼면 6단계 lost update가 다시 생긴다.
+  Lua로 바꾼 이유는 락을 빼려는 게 아니라, **한도 코드가 락에 기대지 않고도 안전하게** 만들기 위해서다.
+  (락 밖에서 실수로 불리거나, 나중에 한도 기준이 "사용자별"로 바뀌어 지갑 락으로는 못 막는 경우에도 지켜진다)
+- 스크립트가 도는 동안 Redis 전체가 멈추므로 짧게 유지한다. 클러스터라면 스크립트가 건드리는 키가 같은 슬롯이어야 하는데, 여기선 키가 하나라 상관없다.
+
+#### 테스트 — 락 없이 두 방식 비교
+
+지갑 락 없이 **한도 확인만** 100건 동시에 부른다 (20,000원 × 100건, 한도 1,000,000원 → 정답은 50건).
+9단계 방식은 테스트 안에 `reserveWithGetAndIncrby`로 그대로 옮겨 대조군으로 남겼다.
+
+| 테스트 | 결과 |
+|---|---|
+| **[락 없음] 9단계 GET → 비교 → INCRBY** | 50건보다 많이 통과, 사용액이 한도를 넘는다 |
+| **[락 없음] Lua** | 정확히 50건 통과, 사용액 정확히 1,000,000원 |
+| [락 + Lua] 실제 결제 흐름 (9단계 테스트) | 정확히 50건 성공 — 그대로 통과 |
+
+```
+>>> [일일 한도, 락 없음, GET/INCRBY] 통과 56건 / 한도 초과 44건 → 사용액 1,120,000원 (한도 1,000,000원)
+>>> [일일 한도, 락 없음, Lua]        통과 50건 / 한도 초과 50건 → 사용액 1,000,000원 (한도 1,000,000원)
+```
+
+- 6번 돌려 본 결과 대조군은 **54 / 55 / 56 / 56 / 100 / 100건** 통과로 매번 한도를 넘었고, 얼마나 넘는지는 실행마다 달랐다.
+  Lua는 6번 모두 정확히 50건이었다.
+- 대조군 테스트는 "50건보다 많다"만 확인한다. 끼어들기가 우연히 한 번도 안 일어나면 깨질 수 있지만, 지금까지는 늘 4건 이상 초과했다.
+- 전체 테스트 32개 통과.
 
 ## API
 

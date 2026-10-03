@@ -106,7 +106,7 @@ class DailyLimitTest extends IntegrationTestSupport {
 	}
 
 	@Test
-	@DisplayName("[락 안에서 GET/INCRBY] 20,000원 결제 100건 동시 요청 → 정확히 50건만 성공, 한도를 넘지 않는다")
+	@DisplayName("[지갑 락 + Lua] 20,000원 결제 100건 동시 요청 → 정확히 50건만 성공, 한도를 넘지 않는다")
 	void concurrentPayWithinLimit() throws InterruptedException {
 		clock.setDate(TODAY);
 		Long walletId = newWalletWithBalance(3_000_000);
@@ -114,13 +114,61 @@ class DailyLimitTest extends IntegrationTestSupport {
 		Result result = ConcurrentRunner.run(100, i -> walletFacade.pay(walletId, 20_000));
 
 		long used = dailyLimitManager.used(walletId, TODAY);
-		System.out.printf(">>> [일일 한도, 락 안] 성공 %d건 / 한도 초과 %d건 → 사용액 %,d원 (한도 %,d원)%n",
+		System.out.printf(">>> [일일 한도, 락 + Lua] 성공 %d건 / 한도 초과 %d건 → 사용액 %,d원 (한도 %,d원)%n",
 				result.success(), result.failure("DAILY_LIMIT_EXCEEDED"), used, LIMIT);
 
 		assertThat(result.success()).isEqualTo(50);
 		assertThat(result.failure("DAILY_LIMIT_EXCEEDED")).isEqualTo(50);
 		assertThat(used).isEqualTo(LIMIT);
 		assertThat(balanceOf(walletId)).isEqualTo(3_000_000 - LIMIT);
+	}
+
+	/*
+	 * 아래 두 테스트는 지갑 락 없이 한도 확인만 100건 동시에 부른다 (잔액·DB는 건드리지 않는다).
+	 * 한도 1,000,000원에 20,000원씩이므로 정확히 50건만 통과해야 맞다.
+	 * - 대조군: 9단계 방식 GET → 비교 → INCRBY (명령 3개, 사이에 끼어들 수 있음)
+	 * - Lua   : 같은 로직을 스크립트 하나로 (끼어들 수 없음)
+	 */
+
+	@Test
+	@DisplayName("[락 없음, 대조군] 9단계 GET → 비교 → INCRBY를 100건 동시에 → 50건보다 많이 통과해 한도를 넘는다")
+	void getAndIncrbyWithoutLockExceedsLimit() throws InterruptedException {
+		Long walletId = 1L;
+
+		Result result = ConcurrentRunner.run(100, i -> reserveWithGetAndIncrby(walletId, 20_000));
+
+		long used = dailyLimitManager.used(walletId, TODAY);
+		System.out.printf(">>> [일일 한도, 락 없음, GET/INCRBY] 통과 %d건 / 한도 초과 %d건 → 사용액 %,d원 (한도 %,d원)%n",
+				result.success(), result.failure("DAILY_LIMIT_EXCEEDED"), used, LIMIT);
+
+		assertThat(result.success()).isGreaterThan(50);
+		assertThat(used).isGreaterThan(LIMIT);
+	}
+
+	@Test
+	@DisplayName("[락 없음, Lua] 같은 조건에서 Lua 스크립트는 정확히 50건만 통과, 한도를 넘지 않는다")
+	void luaWithoutLockKeepsLimit() throws InterruptedException {
+		clock.setDate(TODAY);
+		Long walletId = 1L;
+
+		Result result = ConcurrentRunner.run(100, i -> dailyLimitManager.reserve(walletId, 20_000, TODAY));
+
+		long used = dailyLimitManager.used(walletId, TODAY);
+		System.out.printf(">>> [일일 한도, 락 없음, Lua] 통과 %d건 / 한도 초과 %d건 → 사용액 %,d원 (한도 %,d원)%n",
+				result.success(), result.failure("DAILY_LIMIT_EXCEEDED"), used, LIMIT);
+
+		assertThat(result.success()).isEqualTo(50);
+		assertThat(result.failure("DAILY_LIMIT_EXCEEDED")).isEqualTo(50);
+		assertThat(used).isEqualTo(LIMIT);
+	}
+
+	/** 9단계의 DailyLimitManager.reserve를 그대로 옮긴 것. 비교용 대조군이라 테스트에만 남겨 둔다. */
+	private void reserveWithGetAndIncrby(Long walletId, long amount) {
+		long used = dailyLimitManager.used(walletId, TODAY);                                 // 1. GET
+		if (used + amount > LIMIT) {                                                          // 2. 비교 (자바에서)
+			throw new WalletException(ErrorCode.DAILY_LIMIT_EXCEEDED);
+		}
+		redisTemplate.opsForValue().increment(DailyLimitManager.key(walletId, TODAY), amount);  // 3. INCRBY
 	}
 
 	private Long newWalletWithBalance(long balance) {
